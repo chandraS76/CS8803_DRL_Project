@@ -1,0 +1,161 @@
+\documentclass{article}
+
+%\usepackage{corl_2026} % Use this for the initial submission.
+\usepackage[final]{corl_2026} % Uncomment for the camera-ready ``final'' version.
+%\usepackage[preprint]{corl_2026} % Uncomment for pre-prints (e.g., arxiv); This is like ``final'', but will remove the CORL footnote.
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{url}
+\title{Group 71: Deep Reinforcement Learning to play SoccerTwos}
+
+% The \author macro works with any number of authors. There are two
+% commands used to separate the names and addresses of multiple
+% authors: \And and \AND.
+%
+% Using \And between authors leaves it to LaTeX to determine where to
+% break the lines. Using \AND forces a line break at that point. So,
+% if LaTeX puts 3 of 4 authors names on the first line, and the last
+% on the second line, try using \AND instead of \And before the third
+% author name.
+
+% NOTE: authors will be visible only in the camera-ready and preprint versions (i.e., when using the option 'final' or 'preprint').
+%     For the initial submission the authors will be anonymized.
+
+\author{
+  Chandra Sekhar Reddy Edula\\
+  Georgia Institute of Technology \\
+  \texttt{cedula3@gatech.edu} \\
+  %% examples of more authors
+  \And
+  Sri Siddarth Chakaravarthy Prakash \\
+  Georgia Institute of Technology \\
+  \texttt{sp313@gatech.edu} \\
+  \And
+  Rithik Appachi Senthilkumar \\
+  Georgia Institute of Technology \\
+  \texttt{rsenthilkumar8@gatech.edu} \\
+  %% \And
+  %% Coauthor \\
+  %% Affiliation \\
+  %% Address \\
+  %% \texttt{email} \\
+  %% \And
+  %% Coauthor \\
+  %% Affiliation \\
+  %% Address \\
+  %% \texttt{email} \\
+}
+
+
+\begin{document}
+\maketitle
+
+%===============================================================================
+
+\begin{abstract}
+    We apply Proximal Policy Optimization (PPO) to the SoccerTwos multi-agent environment. The default $+1/-1$ goal reward is sparse, which makes PPO slow to learn anything useful in the early stages. We add a potential-based reward shaping wrapper with both offensive and defensive terms, plus a few event-based bonuses for passing and tackling. The shaped agent wins 10/10 against each of the three baselines provided in the course (random, vanilla-PPO, and the TA agent). Code: \url{https://github.com/chandraS76/CS8803_DRL_Project}.
+\end{abstract}
+
+% Two or three meaningful keywords should be added here
+\keywords{multi-agent reinforcement learning, PPO, reward shaping, SoccerTwos}
+
+%===============================================================================
+
+\section{Introduction}
+
+    SoccerTwos, part of the Unity ML-Agents toolkit \cite{juliani2018unity}, is a 2-vs-2 environment with a high-dimensional observation space and a sparse reward: agents only see a non-zero signal when a goal is scored. This makes credit assignment difficult, since most actions in an episode have no immediate feedback. PPO \cite{schulman2017proximal} handles policy stability well but does not on its own solve the exploration problem when the only learning signal arrives at the end of the episode.
+
+    To get past the early-training phase where the agent has not yet stumbled onto a goal, we add reward shaping with terms for ball proximity, ball progression toward the opponent goal, defensive positioning, defensive pressing, defensive clearance, and event bonuses for passing, tackling, and counter-attacks. We use potential-based shaping \cite{ng1999policy} where applicable so that the optimal policy of the shaped MDP matches the optimal policy of the original game. The shaping covers both offensive and defensive play so the agent does not collapse into one-sided behaviour.
+
+%===============================================================================
+
+\section{Method Description}
+\label{sec:method}
+
+\subsection{Learning Algorithm}
+
+We train with PPO \cite{schulman2017proximal} via Ray RLlib. PPO is a policy-gradient method that is straightforward to tune and stable enough to use without much per-environment work.
+
+\subsubsection{Theoretical Framework}
+
+PPO uses a clipped surrogate objective:
+$$L^{CLIP}(\theta) = \hat{\mathbb{E}}_t \left[ \min(r_t(\theta) \hat{A}_t, \text{clip}(r_t(\theta), 1 - \epsilon, 1 + \epsilon) \hat{A}_t) \right]$$
+where $r_t(\theta)$ is the probability ratio between the new and old policies, and $\hat{A}_t$ is the GAE advantage. We use $\epsilon = 0.2$. The clip bounds the size of each policy update, which prevents the kind of large gradient steps that destabilise vanilla policy gradient on this environment.
+
+\subsubsection{Architecture}
+
+The actor and critic share hidden layers (\texttt{vf\_share\_layers}: True). A single network outputs both the action distribution (over the discrete branches for movement, rotation, and kicking) and a scalar value estimate. The hidden layers are two fully-connected layers of 512 units with ReLU activation.
+
+\subsection{Reward Shaping}
+
+We wrap the environment in a custom shaping layer. Most terms use Potential-Based Reward Shaping (PBRS) \cite{ng1999policy} so the optimal policy is preserved. The shaping reward at step $t$ is:
+
+$$F(s_t, a_t, s_{t+1}) = \gamma \Phi(s_{t+1}) - \Phi(s_t)$$
+
+with $\gamma = 0.99$. The shaping terms fall into three groups:
+
+\begin{itemize}
+    \item \textbf{Proximity and recovery:} a potential term ($\alpha$) on distance to the ball, plus event bonuses for counter-attacks and for passes shortly after a tackle.
+    \item \textbf{Offensive progression:} a possession-gated potential term ($\beta$) on the ball's distance to the opponent goal, and an event bonus ($\epsilon$) for forward passes to open teammates.
+    \item \textbf{Defensive play:} a tackle bonus on possession flips from opponent to us, a positioning term ($\delta$) that penalises being ahead of the ball relative to our own goal, a clearance potential term ($\zeta$) gated on opponent possession that rewards distance from the ball to our own goal, and a pressing term ($\eta$) gated on opponent possession that rewards the nearest defender being close to the ball.
+\end{itemize}
+
+The full implementation is in \texttt{soccer\_env/rewards.py}. The motivation for shaping both sides of the game (rather than just attack) is that an attack-only shaped agent tends to leave its goal exposed, which is fine against a random opponent but not against the trained baselines.
+
+\subsection{Training Configuration}
+
+We train our team (player ids 0 and 1) sharing a single PPO policy. The opposing team (ids 2 and 3) uses a frozen \texttt{RandomPolicy} from RLlib for the entire training run. We do not use self-play. Total training length is 10M environment timesteps.
+
+\subsection{Hyperparameters}
+
+\begin{itemize}
+    \item \textbf{PPO:} entropy coefficient 0.01 (for early-stage exploration), train batch size 24000, SGD minibatch size 2048, learning rate $3 \times 10^{-4}$, discount $\gamma = 0.99$, clip $\epsilon = 0.2$, two hidden layers of 512 units with ReLU activation, rollout fragment length 1000, 10 SGD iterations per batch.
+    \item \textbf{Reward shaping:} potential-shaping discount $\gamma = 0.99$; $\alpha = 0.008$, $\beta = 0.003$, $\epsilon = 0.01$, $\delta = 0.001$, $\zeta = 0.003$, $\eta = 0.001$; tackle bonus 0.04, counter-attack bonus 0.004, open pass bonus 0.02, pass-after-tackle bonus 0.03.
+\end{itemize}
+
+
+
+%===============================================================================
+
+\section{Preliminary Results}
+\label{sec:result}
+
+Figure~\ref{fig:my_image} shows the per-iteration mean episode reward over the 10M-step run, plotted separately for our team and the random opponent. The y-axis is the shaped reward, not raw goal differential, so values around 1.0 do not correspond directly to one net goal per episode.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.8\textwidth]{corl_2026_template_cameraready/training.jpg}
+    \caption{Training our agent against \texttt{RandomPolicy} for 10M timesteps (402 iterations). X axis is iteration; Y axis is mean per-episode shaped reward, plotted separately for our team and the random opponent.}
+    \label{fig:my_image}
+\end{figure}
+
+We evaluated the trained agent over 10 matches each against three opponents: a random policy, the CEIA vanilla-PPO baseline provided by the course, and the TA agent. Results are in Table~\ref{tab:performance}.
+
+\begin{table}[h]
+    \centering
+    \caption{Match results over 10 games per opponent.}
+    \begin{tabular}{|c|c|c|c|c|c|}
+        \hline
+        \textbf{Opponent} & \textbf{Wins} & \textbf{Losses} & \textbf{Draws} & \textbf{Avg. Goals Scored} & \textbf{Avg. Goals Conceded} \\ \hline
+        Random & 10 & 0 & 0 & 35.4 & 0.4 \\ \hline
+        CEIA Baseline PPO & 10 & 0 & 0 & 18.8 & 5.4 \\ \hline
+        TA Agent & 10 & 0 & 0 & 11.2 & 3.4 \\ \hline
+    \end{tabular}
+    \label{tab:performance}
+\end{table}
+
+The training curve plateaus near a mean shaped reward of 1.0 by iteration 100 and stays there for the rest of the run. Against all three baselines the agent wins every match, with the goal-conceded count rising as the opponent gets stronger (0.4 against random, 5.4 against the vanilla-PPO baseline, 3.4 against the TA agent). The TA agent gives up fewer goals than the CEIA baseline but also concedes fewer, suggesting it plays a more conservative and defensively-organised game.
+
+We attribute the gap to the vanilla baseline mainly to the density of the gradient signal during training. Under the sparse reward, most rollouts contain no scoring event, so the critic has little to fit on for mid-field states and the policy improves only on the rare episodes where a goal happens to occur. Adding $\alpha$ and $\beta$ gives every step a non-zero shaping contribution, which means the value function has something to fit on at every state and PPO updates are no longer dominated by a handful of episodes per batch.
+
+The defensive shaping ($\delta, \zeta, \eta$) is the part we are less certain about, but the goals-conceded numbers are consistent with the agent having learned to retreat and press rather than only chase the ball. We did not run an ablation that turns off the defensive terms while keeping the offensive ones, so this is a hypothesis rather than a measured effect, and it would be the obvious next experiment.
+
+
+
+%===============================================================================
+
+% no \bibliographystyle is required, since the corl style is automatically used.
+\bibliography{example}  % .bib
+
+\end{document}
